@@ -1,0 +1,37 @@
+# Cluster-safety guardrails (owner ruling 2026-11-23, after k3d-aimlops-staging was deleted on 2026-11-22 and
+# climavue/market/swimtec/shule had to be rebuilt from a 6-day-old backup).
+# NEVER destroy or recreate the shared k3d cluster, its nodes/containers/volumes, namespaces, PVs/PVCs, CRDs or
+# cluster-scoped objects without the OWNER's explicit go-ahead. Scaling workloads to 0 replicas is ALLOWED
+# (reversible); throwaway Jobs / single pods may be deleted.
+# Test: tests/semgrep/tests/cluster-safety.test.sh
+rules:
+  - id: no-cluster-destroy
+    languages: [generic]
+    severity: ERROR
+    message: >-
+      Destructive cluster operation. The shared k3d cluster (k3d-aimlops-staging) hosts other lanes and their data;
+      deleting/recreating it, its nodes, containers, volumes, namespaces, PVs/PVCs or CRDs forced a full rebuild on
+      2026-11-22. Owner's explicit go-ahead required. Allowed instead: `kubectl scale … --replicas=0`.
+    paths:
+      include: ["**/scripts/**", "**/deploy/**", "**/deployment/**", "Makefile", "*.sh", "*.nu", "*.py",
+                "**/.github/workflows/*", "**/.claude/**", "**/.agents/**", "**/notes/handoff/PROMPTS/**"]
+      exclude: ["**/tests/semgrep/**", "**/.semgrep/tests/**", "**/scripts/guard/**"]
+    pattern-either:
+      # k3d cluster/node teardown or re-create
+      - pattern-regex: '(?m)^[^#\n`]*?(?<![`\w-])k3d\s+(?:cluster\s+(?:delete|create)|node\s+delete)\b'
+      # kubectl delete of namespaces / volumes / CRDs / cluster-scoped objects
+      - pattern-regex: '(?m)^[^#\n`]*?(?<![`\w-])kubectl\b[^\n#`]*\sdelete\s+(?:[^\n#`]*\s)?(?:namespaces?|ns|pvc|persistentvolumeclaims?|pv|persistentvolumes?|crds?|customresourcedefinitions?|nodes?|storageclass(?:es)?|clusterissuers?|clusterroles?|clusterrolebindings?)\b'
+      # kubectl delete of a whole overlay/manifest, or bulk deletes
+      - pattern-regex: '(?m)^[^#\n`]*?(?<![`\w-])kubectl\b[^\n#`]*\sdelete\s+(?:[^\n#`]*\s)?-(?:k|f)\b'
+      - pattern-regex: '(?m)^[^#\n`]*?(?<![`\w-])kubectl\b[^\n#`]*\sdelete\b[^\n#`]*\s(?:--all|--all-namespaces|-A)\b'
+      # helm release removal (Contour/cert-manager/etc.)
+      - pattern-regex: '(?m)^[^#\n`]*?(?<![`\w-])helm\s+(?:uninstall|delete)\b'
+      # removing/stopping the k3d node or load-balancer containers
+      - pattern-regex: '(?m)^[^#\n`]*?(?<![`\w-])(?:podman|docker)\s+(?:rm|stop|kill|container\s+(?:rm|stop|kill))\b[^\n#`]*\bk3d-'
+      # wiping container volumes / the whole engine state
+      - pattern-regex: '(?m)^[^#\n`]*?(?<![`\w-])(?:podman|docker)\s+(?:volume\s+(?:rm|prune)|system\s+reset)\b'
+      # deleting k3s/k3d persistent storage on disk
+      - pattern-regex: '(?m)^[^#\n`]*?(?<![`\w-])rm\s+-[a-zA-Z]*[rf][a-zA-Z]*\s+[^\n#`]*(?:/var/lib/rancher|k3s/storage|k3d)'
+      # python subprocess argv lists
+      - pattern-regex: '["'']k3d["'']\s*,\s*["'']cluster["'']\s*,\s*["''](?:delete|create)["'']'
+      - pattern-regex: '["'']kubectl["'']\s*,\s*(?:["''][^"''\n]*["'']\s*,\s*)*?["'']delete["'']\s*,\s*["''](?:namespace|ns|pvc|pv|crd|node)["'']'

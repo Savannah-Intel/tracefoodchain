@@ -1,0 +1,126 @@
+# Image/host-prune guardrails (owner ruling 2026-11-23, rolled out with cluster-safety.yaml).
+# Copied from sav-medialabs .semgrep/savannah-guardrails.yaml (no-image-prune, host-container-prune-or-reset)
+# and aimlops .semgrep/savannah-guardrails.yaml (blanket-image-prune-foot-gun, blanket-uv-cache-clean-foot-gun).
+# The only exception is the repo's retention-aware safe-image-gc.sh (excluded path).
+# Test: see the cluster-safety test script (image-safety fixtures).
+rules:
+  - id: no-image-prune
+    languages: [generic]
+    severity: ERROR
+    metadata:
+      category: operations
+      confidence: HIGH
+    paths:
+      include: ["**/scripts/**", "**/deploy/**", "**/infra/**", "Makefile", "*.sh", "*.nu", "**/.github/workflows/*"]
+      exclude: ["**/tests/semgrep/**", "**/.semgrep/**", "**/safe-image-gc.sh"]
+    pattern-either:
+      - pattern-regex: '(?m)^[^#\n]*\bpodman (?:image |system |builder )?prune\b'
+      - pattern-regex: '(?m)^[^#\n]*\bdocker (?:image |system |builder )?prune\b'
+      - pattern-regex: '(?m)^[^#\n]*\bctr\b[^\n#]* images? (?:rm|remove|delete)\b'
+      - pattern-regex: '(?m)^[^#\n]*\bcrictl rmi\b'
+    message: >
+      Never prune or delete images by hand. Free image disk only with the retention-aware
+      safe-image-gc.sh (dry-run, then --apply), which keeps in-use, rollback and the newest tags.
+
+  - id: host-container-prune-or-reset
+    languages: [generic]
+    severity: ERROR
+    metadata:
+      category: reliability
+      confidence: HIGH
+      references:
+        - 2026-07-13 incident — a blanket `image prune -a` wiped the shared host image store
+        - 2026-11-15 shared-host incident — host-wide container removal wiped the k3d staging cluster
+    paths:
+      include:
+        - "**/scripts/**"
+        - "**/.github/workflows/**"
+        - "**/*.sh"
+        - "**/*.bash"
+        - "**/*.zsh"
+        - "**/*.nu"
+        - "**/*.py"
+        - "**/Makefile"
+        - "**/makefile"
+        - "**/*.mk"
+        - "**/justfile"
+        - "**/Justfile"
+        - "**/*.just"
+        - "**/Dockerfile"
+        - "**/Dockerfile.*"
+        - "**/*.Dockerfile"
+        - "**/Containerfile"
+      exclude:
+        - "**/.semgrep/**"
+        - "**/tests/semgrep/**"
+        - "**/*.md"
+        - "**/node_modules/**"
+        # Allowlisted: the retention-aware GC this message points to
+        - "**/safe-image-gc.sh"
+    patterns:
+      - pattern-either:
+        - pattern-regex: '(?m)^[^#\n]*\b(?:podman|docker)(?:\s+--?[\w.-]+(?:=\S+)?)*\s+(?:system|volume|container|image|network|builder|buildx)\s+prune\b'
+        - pattern-regex: '(?m)^[^#\n]*\bpodman(?:\s+--?[\w.-]+(?:=\S+)?)*\s+system\s+reset\b'
+        - pattern-regex: '(?m)^[^#\n]*\b(?:podman|docker)(?:\s+--?[\w.-]+(?:=\S+)?)*\s+(?:volume\s+(?:rm|remove)|rmi|image\s+(?:rm|remove))\b[^\n;&|$`]*?\s(?:--all|-[a-zA-Z]*a[a-zA-Z]*)(?=[\s;&|]|$)'
+        - pattern-regex: '(?m)^[^#\n]*\b(?:podman|docker)(?:\s+--?[\w.-]+(?:=\S+)?)*\s+(?:volume\s+(?:rm|remove)|rmi|image\s+(?:rm|remove))\b[^\n]*?[$`]?\(?\s*\^?(?:podman|docker)(?:\s+--?[\w.-]+(?:=\S+)?)*\s+(?:volume\s+(?:ls|list)|images|image\s+(?:ls|list))\b(?:(?!(?:--filter[=\s]+|-f\s+)["'']?(?:name|label|reference)=)[^)\n`])*[)`]'
+      - pattern-not-regex: '(?mi)^[^\n]*\b(?:never|refus\w*|do not|don''t)\b[^\n]*$'
+      # ownership-scoped prune is allowed
+      - pattern-not-regex: '(?m)^[^\n]*--filter[=\s]+["'']?label=[^\n]*$'
+      # age/size-bounded BUILD-CACHE prune (regenerable, never an image or container) is allowed
+      - pattern-not-regex: '(?m)^[^\n]*\b(?:builder|buildx)\s+prune\b[^\n]*(?:--filter[=\s]+["'']?until=|--keep-storage)[^\n]*$'
+    message: >
+      Host-wide prune/reset/bulk removal destroys state that other lanes on the shared host
+      depend on — the k3d node images, other agents' volumes and build caches (2026-07-13: a
+      blanket image prune took a shared service down; 2026-11-15: a host-wide kill wiped
+      staging). For image disk pressure use the retention-aware safe-image-gc.sh. Remove only volumes or
+      images you created, by explicit name/tag, or scope with `--filter label=owner=<lane>`.
+
+  - id: blanket-image-prune-foot-gun
+    languages: [generic]
+    severity: WARNING
+    metadata:
+      category: correctness
+      confidence: HIGH
+    paths:
+      include:
+        - "/scripts/**"
+        - "**/*.sh"
+        - "**/*.nu"
+      exclude:
+        - "**/.semgrep/**"
+        - "**/tests/semgrep/**"
+        # The sanctioned retention-aware GC is the exception (it documents these commands).
+        - "**/safe-image-gc.sh"
+    patterns:
+      - pattern-either:
+          - pattern-regex: '\b(podman|docker)\s+(system|image)\s+prune\b[^\n]*(\s-a\b|--all\b)'
+          - pattern-regex: '\bcrictl\s+rmi\b[^\n]*(--prune|--all|\s-a\b)'
+    message: >
+      Blanket image prune (`prune -a` / `crictl rmi --prune`) wipes locally-built images that are
+      slow/impossible to re-pull and can re-trigger a node DiskPressure taint (2026-07-13 incident).
+      Use the retention-aware safe-image-gc.sh (keeps the latest N important images) instead.
+
+  - id: blanket-uv-cache-clean-foot-gun
+    languages: [generic]
+    severity: WARNING
+    metadata:
+      category: correctness
+      confidence: HIGH
+    paths:
+      include:
+        - "/scripts/**"
+        - "**/*.sh"
+        - "**/*.nu"
+      exclude:
+        - "**/.semgrep/**"
+        - "**/tests/semgrep/**"
+        # The sanctioned retention-aware GC is the exception (it documents these commands).
+        - "**/safe-image-gc.sh"
+    patterns:
+      - pattern-either:
+          - pattern-regex: '\buv\s+cache\s+clean\b'
+          - pattern-regex: '\brm\s+-rf?\b[^\n]*(\$\{?UV_CACHE_DIR\}?|\.cache/uv)\b'
+    message: >
+      Blanket `uv cache clean` / `rm -rf ~/.cache/uv` wipes every cached wheel, forcing a full
+      re-download over the slow mirror (2026-07-13 incident). Use `uv cache prune` (drops only
+      dangling/unused entries, keeps in-use wheels), wired into safe-image-gc.sh.
